@@ -2,27 +2,42 @@
 
 ####################################################################################################
 #
-# Extension Attribute: Entra / Platform SSO Registration Status (Lightweight)
+# Extension Attribute: Entra Platform SSO Registration Status (Lightweight)
 #
 # Description:
-# This Extension Attribute reports the Microsoft Entra (Azure AD) Platform SSO registration status for the active console user on a macOS device managed by Jamf Pro.
+# This script is a lightweight Jamf Pro Extension Attribute used to report Microsoft Entra
+# (Azure AD) Platform SSO registration status for the currently logged-in macOS user.
 #
-# The script queries the Jamf Conditional Access framework (getPSSOStatus) to determine whether the device and user are registered with Microsoft Entra and capable of satisfying Conditional Access requirements.
+# The script queries the Jamf Conditional Access framework (`getPSSOStatus`) to determine
+# whether the device and user are properly registered with Microsoft Entra and capable of
+# satisfying Conditional Access requirements.
 #
-# The output includes:
-#	•	Registration state (Registered / Not Registered)
-#	•	Platform SSO status code and interpretation
-#	•	Azure tenant ID
-#	•	Entra device ID
-#	•	User principal name (UPN)
-#	•	Cloud authentication host
-#	•	Whether the SSO extension is running in full mode
-#	•	JamfAAD Azure ID acquisition state
-#	•	User home directory
+# The Extension Attribute returns the following information:
 #
-# The script is optimized for Jamf inventory performance by inspecting only the current console user and avoiding multi-user scans or keychain enumeration.
+#   • Logged-in user
+#   • User home directory
+#   • Timestamp when the data was captured
+#   • Primary network connection type (WiFi or LAN) based on macOS Network service priority
+#   • Platform SSO registration status and interpretation
+#   • JamfAAD Azure ID acquisition state
+#   • Microsoft Entra tenant ID
+#   • Device ID associated with the Entra registration
+#   • SSO Extension full mode status
+#   • Cloud authentication host
+#   • User Principal Name (UPN)
 #
-# This Extension Attribute can be used to identify devices that are not properly registered with Microsoft Entra or where Platform SSO registration has failed.
+# Optimization Notes:
+# This script is intentionally optimized for Jamf Pro inventory performance.
+# It avoids expensive operations such as:
+#
+#   • Enumerating all local users
+#   • Performing keychain certificate scans
+#   • Running unnecessary network calls
+#
+# Instead, it only inspects the active console user and uses native macOS
+# frameworks to retrieve the required information.
+#
+# This makes the script safe to run during `jamf recon` across large fleets.
 #
 ####################################################################################################
 
@@ -39,6 +54,62 @@ get_value() {
     local key="$2"
     printf '%s\n' "$source" | /usr/bin/awk -F ": " -v k="$key" '$1 == k {print $2; exit}'
 }
+
+captureTime=$(/bin/date "+%Y-%m-%d %H:%M:%S")
+
+############################################
+# Detect primary network type based on macOS service order
+############################################
+
+networkType="Offline"
+
+serviceOrder=$(/usr/sbin/networksetup -listnetworkserviceorder 2>/dev/null)
+
+primaryDevice=$(printf '%s\n' "$serviceOrder" | /usr/bin/awk '
+    /Hardware Port:/ {
+        line=$0
+        port=""
+        device=""
+
+        if (match(line, /Hardware Port: ([^,]+)/)) {
+            port=substr(line, RSTART + 15, RLENGTH - 15)
+        }
+
+        if (match(line, /Device: ([^)]+)/)) {
+            device=substr(line, RSTART + 8, RLENGTH - 8)
+        }
+
+        if (port != "" && device != "") {
+            print port "|" device
+        }
+    }
+' | while IFS='|' read -r port device; do
+    [[ -z "$device" ]] && continue
+
+    ip=$(/usr/sbin/ipconfig getifaddr "$device" 2>/dev/null)
+    if [[ -n "$ip" ]] || /sbin/ifconfig "$device" 2>/dev/null | /usr/bin/grep -q "status: active"; then
+        echo "$port|$device"
+        break
+    fi
+done)
+
+if [[ -n "$primaryDevice" ]]; then
+    primaryPort=${primaryDevice%%|*}
+
+    case "$primaryPort" in
+        "Wi-Fi"|"AirPort")
+            networkType="WiFi"
+            ;;
+        "Ethernet"|"USB Ethernet"|"Thunderbolt Ethernet"|"LAN"|"USB 10/100/1000 LAN")
+            networkType="LAN"
+            ;;
+        *)
+            networkType="LAN"
+            ;;
+    esac
+fi
+
+############################################
 
 loggedInUser=$(/usr/bin/stat -f%Su /dev/console 2>/dev/null)
 if [[ -z "$loggedInUser" || "$loggedInUser" == "root" || "$loggedInUser" == "loginwindow" ]]; then
@@ -69,6 +140,8 @@ fi
 if [[ ! -x "$jamfCA" ]]; then
     echo "<result>User: $loggedInUser
 Home: $userHome
+Captured: $captureTime
+Network: $networkType
 Status: Jamf Conditional Access binary not found
 JamfAAD have_an_Azure_id: $aadID</result>"
     exit 0
@@ -79,6 +152,8 @@ ssoStatus=$(runAsUser "$userUID" "$jamfCA" getPSSOStatus 2>/dev/null | /usr/bin/
 if [[ -z "$ssoStatus" ]]; then
     echo "<result>User: $loggedInUser
 Home: $userHome
+Captured: $captureTime
+Network: $networkType
 Status: No getPSSOStatus data returned
 JamfAAD have_an_Azure_id: $aadID</result>"
     exit 0
@@ -117,6 +192,8 @@ fi
 
 echo "<result>User: $loggedInUser
 Home: $userHome
+Captured: $captureTime
+Network: $networkType
 Registration: $registrationState
 PSSO Status: $rawStatus ($pssoStatusText)
 JamfAAD have_an_Azure_id: $aadID
