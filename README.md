@@ -3,6 +3,7 @@ JAMF-Pro-Scripts
 This repository contains macOS automation scripts designed for use with Jamf Pro, including Extension Attributes, policies, and administrative troubleshooting tools used in enterprise environments.
 
 The scripts focus on common tasks related to:
+
 	•	Microsoft Entra / Azure AD device registration
 	•	Platform SSO diagnostics
 	•	Jamf Conditional Access status reporting
